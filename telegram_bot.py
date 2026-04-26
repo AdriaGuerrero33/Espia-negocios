@@ -28,8 +28,9 @@ def _api(method, payload=None):
     url = f"{API}/{method}"
     data = json.dumps(payload or {}).encode()
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    timeout = 90 if method == "getUpdates" else 20
     try:
-        with urllib.request.urlopen(req, context=ctx, timeout=20) as r:
+        with urllib.request.urlopen(req, context=ctx, timeout=timeout) as r:
             return json.loads(r.read())
     except Exception as e:
         print(f"[API error] {method}: {e}")
@@ -107,7 +108,7 @@ def run():
     offset = 0
     while True:
         try:
-            resp = _api("getUpdates", {"offset": offset, "timeout": 30})
+            resp = _api("getUpdates", {"offset": offset, "timeout": 60})
             for update in resp.get("result", []):
                 offset = update["update_id"] + 1
                 if "message" in update:
