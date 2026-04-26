@@ -1,134 +1,166 @@
-import urllib.request
-import urllib.parse
 import re
 import json
-import ssl
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept-Language": "es-ES,es;q=0.9",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-}
+def _extract_businesses_from_html(html):
+    """Extrae negocios del HTML renderizado de Google Maps."""
+    results = []
 
-ctx = ssl.create_default_context()
+    # Google Maps embebe los datos en bloques JSON dentro del HTML
+    # Buscamos patrones de nombre + dirección que aparecen en perfiles de contribuidor
 
+    # Patrón: bloques de reseñas con nombre del negocio y dirección
+    blocks = re.findall(
+        r'"([^"]{3,80})"\s*,\s*"([^"]*(?:calle|c\.|av\.|plaza|paseo|cami)[^"]*)"',
+        html, re.IGNORECASE
+    )
 
-def _fetch(url):
-    req = urllib.request.Request(url, headers=HEADERS)
-    try:
-        with urllib.request.urlopen(req, context=ctx, timeout=15) as r:
-            return r.read().decode("utf-8", errors="ignore")
-    except Exception as e:
-        return None
+    # Patrón alternativo: buscar nombres de negocios cerca de coordenadas o ratings
+    names = re.findall(r'class="[^"]*fontHeadlineSmall[^"]*"[^>]*>([^<]{3,60})<', html)
+    addresses = re.findall(r'class="[^"]*fontBodyMedium[^"]*"[^>]*>([^<]{5,100})<', html)
 
+    seen = set()
 
-def _extract_place_ids(html):
-    """Extrae IDs de lugares de un perfil de contribuidor."""
-    return re.findall(r'"(0x[0-9a-fA-F]+:[0-9a-fA-F]+)"', html)
+    # Intentar extraer del JSON embebido (window.__initData o similar)
+    json_blobs = re.findall(r'\[\s*"([^"]{3,80})"\s*,\s*null\s*,\s*\[\s*\[\s*null\s*,\s*"([^"]{5,})"', html)
+    for blob in json_blobs:
+        nombre = blob[0].strip()
+        direccion = blob[1].strip()
+        if nombre not in seen and len(nombre) > 2:
+            seen.add(nombre)
+            results.append({
+                "nombre": nombre,
+                "direccion": direccion,
+                "telefono": "",
+                "email": "",
+                "web": "",
+            })
 
+    for name in names:
+        name = name.strip()
+        if name and name not in seen and len(name) > 2:
+            seen.add(name)
+            results.append({
+                "nombre": name,
+                "direccion": "",
+                "telefono": "",
+                "email": "",
+                "web": "",
+            })
 
-def _extract_business_info_from_html(html, url=""):
-    info = {
-        "nombre": "",
-        "telefono": "",
-        "email": "",
-        "web": "",
-        "direccion": "",
-        "url_origen": url,
-    }
-
-    # Nombre
-    for pattern in [
-        r'"name"\s*:\s*"([^"]{3,80})"',
-        r'<title>([^<]{3,80})</title>',
-        r'aria-label="([^"]{3,80})"',
-    ]:
-        m = re.search(pattern, html)
-        if m:
-            info["nombre"] = m.group(1).strip()
-            break
-
-    # Teléfono
-    tel = re.search(r'(\+?[\d\s\-\(\)]{9,16})', html)
-    if tel:
-        info["telefono"] = tel.group(1).strip()
-
-    # Web
-    web = re.search(r'https?://(?!maps\.google|google\.com|goo\.gl)[^\s"\'<>]{5,}', html)
-    if web:
-        info["web"] = web.group(0).strip()
-
-    # Email (a veces aparece en la web del negocio)
-    email = re.search(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}', html)
-    if email and "google" not in email.group(0):
-        info["email"] = email.group(0)
-
-    # Dirección
-    addr = re.search(r'"address"\s*:\s*"([^"]{5,})"', html)
-    if addr:
-        info["direccion"] = addr.group(1)
-
-    return info
-
-
-def _try_fetch_email_from_web(web_url):
-    """Intenta encontrar email en la web del negocio."""
-    if not web_url:
-        return ""
-    html = _fetch(web_url)
-    if not html:
-        return ""
-    email = re.search(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}', html)
-    if email and not any(x in email.group(0) for x in ["google", "example", "sentry", "pixel"]):
-        return email.group(0)
-    return ""
+    return results
 
 
 def extract_from_profile_url(url):
     """
-    Recibe una URL de perfil de contribuidor de Google Maps y devuelve
-    una lista de dicts con info de los negocios reseñados.
+    Usa Playwright para renderizar el perfil y extraer los negocios reseñados.
     """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return [{"error": "Playwright no instalado. Ejecuta: pip install playwright && playwright install chromium"}]
+
     results = []
-    html = _fetch(url)
-    if not html:
-        return [{"error": "No se pudo acceder a la URL (posible bloqueo de Google)"}]
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            locale="es-ES"
+        )
+        try:
+            page.goto(url, wait_until="networkidle", timeout=30000)
+            page.wait_for_timeout(3000)
 
-    # Buscar bloques de datos de negocios en el HTML
-    # Google Maps embebe datos JSON en el HTML
-    place_blocks = re.findall(r'\["([^"]{3,80})",[^]]*?"(\+?[\d\s\-\(\)]{9,16})"', html)
+            # Extraer tarjetas de reseñas — cada reseña tiene el nombre del negocio
+            cards = page.query_selector_all('[data-review-id], [jsaction*="review"], .jftiEf, .WMbnJf')
 
-    seen = set()
-    for block in place_blocks:
-        nombre = block[0].strip()
-        telefono = block[1].strip()
-        if nombre in seen:
-            continue
-        seen.add(nombre)
-        results.append({
-            "nombre": nombre,
-            "telefono": telefono,
-            "email": "",
-            "web": "",
-            "direccion": "",
-            "url_origen": url,
-        })
+            seen = set()
+            for card in cards:
+                nombre = ""
+                direccion = ""
+                telefono = ""
 
-    # Si no encontramos nada estructurado, intentamos extracción genérica
+                # Nombre del negocio
+                for sel in ['.OSrXXb', '.fontHeadlineSmall', 'a[href*="maps/place"]', '.kvMYJc']:
+                    el = card.query_selector(sel)
+                    if el:
+                        t = el.inner_text().strip()
+                        if t and len(t) > 2:
+                            nombre = t
+                            break
+
+                # Si no encontramos en la tarjeta, buscar enlace al lugar
+                if not nombre:
+                    link = card.query_selector('a[href*="/maps/place/"]')
+                    if link:
+                        href = link.get_attribute('href') or ''
+                        m = re.search(r'/maps/place/([^/@]+)', href)
+                        if m:
+                            nombre = urllib_unquote(m.group(1).replace('+', ' '))
+
+                # Dirección
+                for sel in ['.fontBodyMedium', '.Io6YTe', '.rogA2c']:
+                    el = card.query_selector(sel)
+                    if el:
+                        t = el.inner_text().strip()
+                        if t and len(t) > 5:
+                            direccion = t
+                            break
+
+                if nombre and nombre not in seen:
+                    seen.add(nombre)
+                    results.append({
+                        "nombre": nombre,
+                        "direccion": direccion,
+                        "telefono": telefono,
+                        "email": "",
+                        "web": "",
+                        "url_origen": url,
+                    })
+
+            # Si no encontramos con selectores específicos, intentar con el HTML
+            if not results:
+                html = page.content()
+                results = _extract_businesses_from_html(html)
+                for r in results:
+                    r["url_origen"] = url
+
+            # Para cada negocio, intentar obtener teléfono visitando su página
+            for biz in results[:10]:  # límite de 10 para no tardar demasiado
+                nombre_enc = biz["nombre"].replace(" ", "+")
+                search_url = f"https://www.google.com/maps/search/{nombre_enc}"
+                try:
+                    page.goto(search_url, wait_until="networkidle", timeout=15000)
+                    page.wait_for_timeout(2000)
+                    # Teléfono
+                    for sel in ['[data-item-id*="phone"] .Io6YTe', 'button[data-item-id*="phone"] .rogA2c', '[aria-label*="eléfono"]']:
+                        el = page.query_selector(sel)
+                        if el:
+                            biz["telefono"] = el.inner_text().strip()
+                            break
+                    # Web
+                    for sel in ['a[data-item-id*="authority"]', 'a[href*="http"][aria-label*="eb"]']:
+                        el = page.query_selector(sel)
+                        if el:
+                            biz["web"] = el.get_attribute("href") or ""
+                            break
+                except Exception:
+                    pass
+
+        finally:
+            browser.close()
+
     if not results:
-        info = _extract_business_info_from_html(html, url)
-        if info["nombre"]:
-            results.append(info)
-
-    # Intentar enriquecer con email desde la web del negocio
-    for r in results:
-        if r.get("web") and not r.get("email"):
-            r["email"] = _try_fetch_email_from_web(r["web"])
-
-    if not results:
-        return [{"error": "No se encontraron negocios en este perfil. Google Maps puede estar bloqueando el acceso."}]
+        return [{"error": "No se encontraron negocios. Google Maps puede haber cambiado su estructura."}]
 
     return results
+
+
+def urllib_unquote(s):
+    try:
+        from urllib.parse import unquote
+        return unquote(s)
+    except Exception:
+        return s
 
 
 def format_result(biz):
