@@ -17,7 +17,7 @@ from maps_agent import extract_from_profile_url, format_result
 # ── Configuración ──────────────────────────────────────────────────────────────
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8687984349:AAHsiQCtx-XVLR0KjOj509zoagRCD0VRjdI")
 ALLOWED_USER = os.environ.get("TELEGRAM_ALLOWED_USER_ID", "8601500155")
-SHEETS_WEBHOOK = os.environ.get("SHEETS_WEBHOOK_URL", "")  # opcional
+SHEETS_WEBHOOK = os.environ.get("SHEETS_WEBHOOK_URL", "https://script.google.com/macros/s/AKfycbxM6Gw4QKe-M_J_HqEP2PXxT2xydiaKWypZZMoeKQOnwgiWUNabJOsCoPkPTq2vgydN/exec")
 
 API = f"https://api.telegram.org/bot{TOKEN}"
 ctx = ssl.create_default_context()
